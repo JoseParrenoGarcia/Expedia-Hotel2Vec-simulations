@@ -3,6 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple
 import numpy as np
+from data import generate_skipgram_pairs
+from typing import Optional
+from diagnostics import (
+    collect_snapshots,
+    TrainingSnapshot,
+    compute_score_matrix,
+)
+from plots import plot_score_heatmap, plot_training_curves
+import plotly.io as pio
+
+pio.renderers.default = "browser"
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
@@ -158,6 +169,8 @@ class SkipGramNCEClickModel:
         max_epochs: int = 200,
         tol: float = 1e-6,
         verbose: bool = True,
+        snapshots: Optional[list[TrainingSnapshot]] = None,
+        snapshot_every: int = 1,
     ) -> List[TrainStats]:
         """
         Online SGD training until convergence.
@@ -201,6 +214,9 @@ class SkipGramNCEClickModel:
 
             history.append(TrainStats(epoch, mean_loss, mean_s_pos, mean_s_neg))
 
+            if snapshots is not None and (epoch % snapshot_every == 0):
+                collect_snapshots(epoch=epoch, Wc=self.Wc, Wnce=self.Wnce, store=snapshots, copy_arrays=True)
+
             if verbose and (epoch == 1 or epoch % 10 == 0):
                 print(
                     f"Epoch {epoch:3d} | mean_loss={mean_loss:.6f} "
@@ -221,3 +237,69 @@ class SkipGramNCEClickModel:
 
         return history
 
+
+def main() -> None:
+    # Two sessions, each with three clicks.
+    # Use at least 4 hotels in the vocabulary so negatives exist cleanly.
+    sessions = [
+        [0, 1, 2],
+        [2, 1, 3],
+    ]
+    window_size = 1
+
+    pairs = generate_skipgram_pairs(sessions, window_size=window_size)
+    print("Sessions:", sessions)
+    print("Window size:", window_size)
+    print("Training pairs (target, context):", pairs)
+    print("Number of pairs:", len(pairs))
+    print()
+
+    # Model hyperparameters (small, simple)
+    num_hotels = 4     # hotels are IDs 0..3
+    embed_dim = 5
+    num_negatives = 2
+    lr = 0.5
+
+    model = SkipGramNCEClickModel(
+        num_hotels=num_hotels,
+        embed_dim=embed_dim,
+        num_negatives=num_negatives,
+        lr=lr,
+        seed=42,
+    )
+
+    history = model.train(
+        pairs=pairs,
+        max_epochs=2000,
+        tol=1e-7,
+        verbose=True,
+    )
+
+    scores = compute_score_matrix(model.Wc, model.Wnce)
+    plot_score_heatmap(scores, show_values=True)
+
+    epochs = [h.epoch for h in history]
+    mean_loss = [h.mean_loss for h in history]
+    mean_s_pos = [h.mean_s_pos for h in history]
+    mean_s_neg = [h.mean_s_neg for h in history]
+    plot_training_curves(epochs, mean_loss, mean_s_pos, mean_s_neg)
+
+    print("\nFinal matrices (rounded):")
+    print("\nWc (input embeddings):")
+    print(model.Wc.round(4))
+    print("\nWnce (output/context embeddings):")
+    print(model.Wnce.round(4))
+
+    # A tiny “what did it learn?” peek:
+    # Show dot products for a few likely-positive pairs from the sessions.
+    def score(t: int, c: int) -> float:
+        return float(model.Wc[t] @ model.Wnce[c])
+
+    print("\nDot products for observed context pairs:")
+    observed = list(dict.fromkeys(pairs))  # unique in original order
+    for t, c in observed:
+        print(f"score(target={t}, context={c}) = {score(t,c):+.4f}")
+
+
+if __name__ == "__main__":
+    main()
